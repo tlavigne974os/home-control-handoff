@@ -6,6 +6,45 @@
 
 ---
 
+## Original DC Prompt
+
+> **Phase 0d.1 — HAClient Actor Migration**
+>
+> Goal: promote HAClient and its two concrete types from AnyObject-constrained classes to Swift actors. No UI changes. No behavior changes. This is pure architecture — tighten the concurrency model so strict checking can pass.
+>
+> **Part 1 — HAClient protocol: AnyObject → Actor**
+> Change `public protocol HAClient: AnyObject` to `public protocol HAClient: Actor`. This makes all protocol members actor-isolated. Update the comment block. Note: callers in HAController (@MainActor) will now need `await` on every haClient.* call — that's expected and correct.
+>
+> **Part 2 — PollingHAClient: class → actor**
+> Change `final class PollingHAClient: HAClient` to `actor PollingHAClient: HAClient`. Remove `pollingTask` and the poll loop — HAController already owns loop scheduling. Reconcile `connect()` vs `init()`: `connect()` should validate credentials via one `fetchAllStates()` call and throw on failure. `disconnect()` marks `isConnected = false`. `fetchHome()` is called by HAController's loop, not internally.
+>
+> **Part 3 — MockHAClient: class → actor**
+> Change `public final class MockHAClient: HAClient` to `public actor MockHAClient: HAClient`. Stubs unchanged.
+>
+> **Part 4 — entityHealth on the protocol (Option A)**
+> Add `var entityHealth: EntityHealth? { get }` to the HAClient protocol. Define `public struct EntityHealth: Sendable { let resolved: Int; let total: Int; var isFullyResolved: Bool }`. MockHAClient returns `EntityHealth(resolved: 8, total: 8)`. PollingHAClient computes it in `fetchHome()`. HAController reads `await haClient.entityHealth` — no cast to PollingHAClient anywhere. Update AppModel and SettingsView (`!h.isFullyResolved`).
+>
+> **Part 5 — callService: [String: Any] → [String: any Sendable]**
+> HA service data values are always String/Int/Double/Bool — all Sendable. Change the signature to `data: [String: any Sendable]` throughout (protocol + both implementations + HAController stubs).
+>
+> **Part 6 — HomeSnapshot: Sendable + cascade**
+> Mark `HomeSnapshot: Sendable`. This cascades: add `: Sendable` to all value types in HomeModels.swift that HomeSnapshot (transitively) contains. All are pure structs/enums — unconditional conformance, no `@unchecked`.
+>
+> **Part 7 — Strict concurrency on HomeControlCore**
+> In Package.swift, add `.unsafeFlags(["-strict-concurrency=complete"])` to the HomeControlCore target. Build must succeed with zero warnings. Fix anything the checker surfaces.
+>
+> **Suggested commit sequence:**
+> 1. Protocol AnyObject→Actor + StateChangeEvent Sendable verification + EntityHealth  
+> 2. PollingHAClient class→actor + reconcile connect()/init()/polling loop  
+> 3. MockHAClient class→actor  
+> 4. Caller updates (HAController, any other consumers)  
+> 5. entityHealth migration  
+> 6. Strict concurrency enablement + any cleanups  
+>
+> Tag the final state `v0.4.3-actor`.
+
+---
+
 ## What Changed
 
 Phase 0d.1 is a pure architecture pass: no UI changed, no behavior changed. The goal was to promote `HAClient` and its concrete implementations from `AnyObject`-constrained classes to Swift actors, enabling safe data-race detection under the complete concurrency checker.
