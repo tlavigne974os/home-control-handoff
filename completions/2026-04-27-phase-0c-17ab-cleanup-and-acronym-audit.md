@@ -281,3 +281,22 @@ This phase is find-and-present only. `tools/phrases.json` is unchanged. No re-re
 **Two commits:**
 - `ed7cc95` — render script auto-copy
 - `f5c6023` — acronym audit document + tag
+
+---
+
+## Phase 0c.17c — Acronym fixes applied (same session)
+
+Todd's decision: fix all 4 dotted-acronym phrases. Keep phrase #003 (A.M./a.m.) as-is.
+
+**Substitutions made:**
+
+| # | Before | After |
+|---|--------|-------|
+| 013 | S.H.I.E.L.D. | Shield |
+| 029 | J.A.R.V.I.S. | Jarvis |
+| 052 | S.H.I.E.L.D. | Shield |
+| 068 | J.A.R.V.I.S. | Jarvis |
+
+**Re-render:** 4 rendered / 195 skipped / 0 errors — 8.2s, 290KB  
+**Bundle manifest:** auto-copied by render script (0c.17a-cleanup working as intended)  
+**Commit:** `3399f7d` on branch `phase-0c-17ab-cleanup-and-audit`
