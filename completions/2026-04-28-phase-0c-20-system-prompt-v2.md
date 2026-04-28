@@ -144,7 +144,29 @@ https://github.com/tlavigne974os/home-control-handoff/blob/main/completions/2026
 
 ## Implementation
 
-*(Sections below filled in as work completes.)*
+---
+
+## Bonus — Telemetry Unification
+
+Not in the original spec but done in the same session per user request. All `print()` statements across the voice pipeline were changed from the `──` prefix style to a single, typeable `[Baxter]` prefix.
+
+**Files updated:** VoiceCoordinator, VoiceService, ClaudeVoiceAssistant, AppleSpeechCoordinator, WakeWordDetector, AppModel (26 print statements total).
+
+**How to use:** In Console.app on Mac, filter by process `WallPanel` and search `[Baxter]`. See the full voice pipeline timeline in one place.
+
+**Sample timeline for a successful conversation:**
+```
+[Baxter] system prompt loaded (2847 chars)    ← app launch, v2 loaded
+[Baxter] wake word started (sensitivity: 0.5) ← when Porcupine linked
+[Baxter] listening started                    ← STT engaged
+[Baxter] stop → transcript = "Hey, tell me a joke"
+[Baxter] thinking tick playing (duration: 2.40s)
+[Baxter] LLM first token received             ← Claude API latency ends here
+[Baxter] first Cartesia audio chunk received  ← TTS pipeline latency ends here
+[Baxter] playing raw audio ...                ← audio starts
+```
+
+**Thinking tick discovery:** `phrase_200-229.m4a` (the thinking tick pool) do not exist in the bundle. You'll see `[Baxter] pool thinkingTick: 0/30 files found` at launch — ticks are silently skipped. Adding audio files to that range will light them up without any code change. The transcript (`processingUserUtterance` state) does show correctly even without the tick audio.
 
 ---
 
@@ -252,6 +274,9 @@ Files now in public handoff repo:
 - [x] Committed to main directly
 - [x] Sync run — v1 and v2 mirrored to handoff repo `baxter-character/`
 - [x] `baxter-character/README.md` explains versioning discipline
+- [ ] Device: install build 71 (iPad was unavailable at session end — build 70 is currently running)
 - [ ] Device: Baxter responds to "What's your name?" with new NAME HANDLING section content
 - [ ] Device: "Tell me a story" → honored at full length (not truncated)
 - [ ] Device: second witty response is plain (CHARACTER CALIBRATION verified in lived use)
+- [ ] Device: Console shows `[Baxter]` prefix on all telemetry entries (search `[Baxter]` in Console.app)
+- [ ] Note: `[Baxter] pool thinkingTick: 0/30 files found` at launch = expected (phrase_200-229.m4a not in bundle)
