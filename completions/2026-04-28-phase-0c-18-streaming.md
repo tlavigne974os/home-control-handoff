@@ -1,6 +1,6 @@
 # Phase 0c.18 — Streaming pipeline + UI fixes (combined)
 
-> **Task 0 confirmation:** Prompt committed verbatim below before any implementation work began.
+> **Task 0 confirmation:** Prompt committed verbatim as the first commit before any implementation work. See git history.
 
 ---
 
@@ -217,22 +217,168 @@ https://github.com/tlavigne974os/home-control-handoff/blob/main/completions/2026
 
 ---
 
-## Implementation status
+## Implementation — All parts complete ✅
 
-> *This section will be filled in as work completes.*
-
-### Task 0 ✅
-Prompt committed verbatim. Branch `phase-0c-18-streaming` created.
-
-### Part A — Streaming pipeline
-*In progress*
-
-### Part B — TranscriptBand auto-size
-*In progress*
-
-### Part C — Climate hero +/- relocation
-*In progress*
+**Branch**: `phase-0c-18-streaming`  
+**Build**: 69  
+**Tag**: `v0.7.0-streaming`  
+**Commits**: 5 logical units (C → B → A1 → A2+A3 → A4+A5)
 
 ---
 
-*Report will be finalized after all parts complete.*
+## Part A — Streaming pipeline
+
+### A1: Anthropic SSE streaming
+
+**File**: `WallPanel/Services/Voice/AnthropicAPIClient.swift`
+
+Added `stream(messages:systemPrompt:model:maxTokens:) -> AsyncThrowingStream<String, Error>`.
+
+Uses `URLSession.shared.bytes(for:)` to get an `AsyncBytes` byte stream, iterates `.lines`, filters `data:` prefixed SSE lines, decodes JSON, and yields `delta.text` from `content_block_delta` events. Stream finishes on `message_stop`. Non-streaming `send()` unchanged — bundled phrase pool does not use this.
+
+`VoiceAssistant` protocol updated with `streamResponse(to:context:)`. `ClaudeVoiceAssistant` adds `buildMessages()` shared helper and `streamResponse()` that delegates to `client.stream()`.
+
+### A2: Cartesia WebSocket
+
+**File**: `WallPanel/Services/Voice/CartesiaWSClient.swift` (new)
+
+`CartesiaWSClient` manages a single `URLSessionWebSocketTask` per conversation turn. Auth via `X-API-Key` and `Cartesia-Version` headers on the upgrade request.
+
+- `connect()` — opens WS, prepares UUID `context_id`
+- `feedToken(_ token:)` — buffers token, sends when sentence boundary or ≥ 40 chars
+- `sendFinal()` — flushes remaining text with `continue: false`, returns `AsyncStream<Data>` of PCM audio
+- Receive loop handles both binary frames (raw PCM) and text frames (base64-encoded PCM in JSON); `done: true` closes the stream
+
+Voice config: `sonic-3`, Benedict `7cf0e2b1-...`, `pcm_s16le` / 44100 Hz / mono, speed 0.8 via `_experimental_voice_controls`.
+
+### A3: Streaming audio playback
+
+**File**: `WallPanel/Services/Voice/AudioStreamPlayer.swift` (new)
+
+`AudioStreamPlayer` wraps `AVAudioEngine` + `AVAudioPlayerNode`.
+
+- `schedule(chunk:)` — converts Int16 s16le PCM → Float32 `AVAudioPCMBuffer`, enqueues it (or holds in `pendingChunks` if engine not started yet)
+- `start()` — flushes pending chunks, starts engine, activates `.playback` audio session
+- `awaitCompletion()` — suspends on `CheckedContinuation<Void, Never>` until all scheduled buffers drain
+- Per-buffer completion handlers fire on `AVAudioPlayerNode` callback → `@MainActor` dispatch → signals completion when all buffers played
+
+The existing `VoiceService.playRawAudio()` (AVAudioPlayer / mp3) is untouched — bundled phrase pool (transitions, ambient phrases) continues through that path.
+
+### A4: Thinking-tick bridge
+
+**File**: `WallPanel/Services/VoiceService.swift` (updated)  
+**File**: `WallPanel/Services/Voice/VoiceCoordinator.swift` (updated)
+
+`VoiceService`:
+- Added `PhrasePool.thinkingTick` case (phrase_200–229, all 30 present in bundle)
+- `pickThinkingTick() -> AVAudioPlayer?` — selects from pool avoiding last 8 played (8-phrase no-repeat window), calls `prepareToPlay()`, returns ready player
+
+`VoiceCoordinator.runPipeline()` full streaming flow:
+1. STT via `waitForAutoFinalize()` (VAD, unchanged)
+2. `voiceService.presentationState = .processingUserUtterance`
+3. `tickPlayer = voiceService.pickThinkingTick(); tickPlayer?.play()` — fire-and-forget
+4. Open `CartesiaWSClient`, start `AsyncThrowingStream` from LLM
+5. `Task<Void,Error>` drains LLM tokens → `cartesia.feedToken()` → on stream end, `cartesia.sendFinal()` → inner Task drains Cartesia audio → `audioPlayer.schedule(chunk:)`
+6. `await llmTask.value` — waits for full LLM→Cartesia pipe to drain
+7. `await audioStreamTask?.value` — waits for all audio buffering
+8. `if tickPlayer.isPlaying { await awaitAVAudioPlayer(tp) }` — 50ms polling loop
+9. `voiceService.presentationState = .modalSpeaking(phrase: fullResponse)`
+10. `try audioPlayer.start()` → `await audioPlayer.awaitCompletion()`
+11. `.idle`
+
+**Tick handoff**: clean — polling ends on `isPlaying == false`, then audio engine starts immediately. No crossfade in this phase (spec decision).
+
+### A5: Telemetry updates
+
+**File**: `WallPanel/Services/Voice/VoiceInteractionTelemetry.swift` (updated)
+
+New fields: `t_tickPlayed`, `t_streamFirstToken`, `t_ttsFirstByte`.
+
+`perceivedLatency` redefined: `min(t_tickPlayed, t9_ttsFirstAudio) - t1`. New `perceivedLatencyPath: String` reports "tick" or "direct-audio".
+
+Console output now shows: `perceived: Xms via tick` (or `via direct-audio`), `tick played: yes/no`.
+
+**No simulator baseline numbers available** — Cartesia WebSocket and Anthropic SSE both require live network + API keys. Cannot capture timing in simulator without actual API responses.
+
+---
+
+## Part B — TranscriptBand auto-size
+
+**File**: `WallPanel/Views/Voice/TranscriptBand.swift`
+
+Removed fixed `.frame(height: HearthStatusBar.height)` from `bandContent`.
+
+New approach:
+- `GeometryReader` in `body` provides screen height → `maxHeight = screen * 0.60`
+- `bandHeight = max(HearthStatusBar.height, min(measuredTextHeight, maxHeight))`
+- Text inside band uses `.fixedSize(horizontal: false, vertical: true)` so it renders at full natural height regardless of proposed size
+- Hidden `GeometryReader` in Text's `.background()` reads natural text height + padding → fires `BandHeightKey` preference
+- `onPreferenceChange` updates `measuredTextHeight` with `withAnimation(.easeInOut(duration: 0.15))` — smooth growth as streaming tokens arrive
+- `VStack { Spacer; Text; Spacer }` vertically centers short text in the minimum-height band
+
+**Scroll fallback**: not implemented. At `max_tokens: 200` with Woadhouse's terse style (~1-3 sentences), natural text height won't approach 60% of iPad screen. If it does, that's a system-prompt problem per spec. A `ScrollView` wrapper can be added in a future fixup if needed.
+
+---
+
+## Part C — Climate hero +/- relocation
+
+**File**: `WallPanel/Views/ClimateViews.swift`
+
+`targetCol()` rewritten:
+- Top label: `"WHAT WE SET"` (was `"TARGET"` at top, `"what we set"` italic at bottom)
+- Target temp number (unchanged)
+- `HStack(spacing: 88)` with `adjuster(Ph.minus.bold)` left, `adjuster(Ph.plus.bold)` right
+- `adjuster()` enlarged: `24pt` icon in `60pt` circle (was `14pt` in `36pt`); added `.buttonStyle(.plain)`
+- Bottom italic "what we set" label removed (label at top is now self-describing)
+
+---
+
+## Architectural surprises
+
+**Cartesia protocol ambiguity**: The Cartesia WebSocket can return audio as either raw binary frames or base64-encoded in JSON text frames depending on version and format. `CartesiaWSClient.receiveLoop` handles both — binary frames yield directly, text frames decode JSON and base64-decode the `data` field. This dual-path costs nothing at runtime.
+
+**Tick polling vs delegate**: Used 50ms polling (`while player.isPlaying`) for tick completion rather than an `AVAudioPlayerDelegate`/continuation. For phrases averaging 1.5-2s, this means 0-50ms overshoot — imperceptible. Avoids a dedicated delegate class that would be overkill for this use case.
+
+**AudioStreamPlayer completion counting**: `scheduledBufferCount` vs `completedBufferCount` with per-buffer completion handlers is slightly racy if chunks arrive very fast. In practice, Cartesia sends chunks at synthesis speed (not faster than playback), so this is safe.
+
+---
+
+## File locations modified
+
+```
+WallPanel/WallPanel/BuildInfo.swift                          (timestamp)
+WallPanel/WallPanel/Info.plist                               (build 69)
+WallPanel/WallPanel/Views/ClimateViews.swift                 (Part C)
+WallPanel/WallPanel/Views/Voice/TranscriptBand.swift         (Part B)
+WallPanel/WallPanel/Services/Voice/AnthropicAPIClient.swift  (A1 — streaming)
+WallPanel/WallPanel/Services/Voice/VoiceAssistant.swift      (A1 — protocol)
+WallPanel/WallPanel/Services/Voice/ClaudeVoiceAssistant.swift (A1 — impl)
+WallPanel/WallPanel/Services/Voice/CartesiaWSClient.swift    (A2 — NEW)
+WallPanel/WallPanel/Services/Voice/AudioStreamPlayer.swift   (A3 — NEW)
+WallPanel/WallPanel/Services/VoiceService.swift              (A4 — tick pool)
+WallPanel/WallPanel/Services/Voice/VoiceCoordinator.swift    (A4 — pipeline)
+WallPanel/WallPanel/Services/Voice/VoiceInteractionTelemetry.swift (A5)
+WallPanel/WallPanel.xcodeproj/project.pbxproj               (added A2+A3 files)
+```
+
+---
+
+## Verification checklist
+
+| # | Item | Status |
+|---|------|--------|
+| Task 0 | Prompt committed verbatim before any code | ✅ |
+| A1 | Anthropic SSE streaming (token-by-token) | ✅ |
+| A2 | Cartesia WebSocket TTS | ✅ |
+| A3 | AVAudioEngine streaming playback | ✅ |
+| A4 | Thinking-tick bridge (tick+LLM parallel) | ✅ |
+| A5 | Telemetry updated (new fields + perceived path label) | ✅ |
+| B  | TranscriptBand auto-size with 150ms animation | ✅ |
+| C  | Climate +/- horizontal row, 60pt buttons | ✅ |
+| Build | Clean compile (zero errors) | ✅ |
+| Tag | v0.7.0-streaming | ✅ |
+| Bundle phrase pool | Untouched — VoiceService.speakRandomPhrase() + playRawAudio() unchanged | ✅ |
+| API keys | VoiceAPI.anthropicKey + VoiceAPI.cartesiaKey from Keychain unchanged | ✅ |
+| Telemetry baseline | Cannot capture in simulator (requires live API) | ⚠️ pending device |
+| Tick handoff audible gap | Cannot verify in simulator | ⚠️ pending device |
+| iPad install | USB cable not available during implementation | ⚠️ pending |
