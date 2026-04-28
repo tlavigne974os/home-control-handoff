@@ -1,8 +1,8 @@
 # Phase 0c.16-revise — Voice transcription redesign
 **Date:** 2026-04-27  
-**Tag:** v0.5.5-voice-revise  
+**Tag:** v0.5.5-voice-revise (pending — awaiting device verification)  
 **Branch:** phase-0c-16-revise  
-**Status:** 🔄 In progress
+**Status:** ⏸ Code complete — awaiting device install for Task 4 verification
 
 ---
 
@@ -353,3 +353,152 @@ DELIVERABLES
 - Both iPads (Pro and Air) running the redesigned build
 - Old AmbientTranscriptBand component file removed (not just unused)
 ```
+
+---
+
+## TASK 1 RESULTS — Rollback
+
+**Fixup branch state at rollback time:**  
+Branch `phase-0c-16-fixup` had **zero commits** — only two files with uncommitted working-tree changes:
+- `WallPanel/WallPanel/Services/VoiceService.swift` — partial Mode A/B leak fix in progress
+- `WallPanel/WallPanel/Views/Voice/AmbientTranscriptBand.swift` — partial chrome additions started
+
+Both discarded cleanly with `git checkout -- .`. No revert needed.
+
+**Baseline confirmed:**  
+main at `56bcfed` — `Merge phase-0c-17ab-cleanup-and-audit → main` — tagged `v0.5.4`. Verified before branching.
+
+**New branch:**  
+`phase-0c-16-revise` created off `56bcfed` (v0.5.4). All revise work is on this branch.
+
+---
+
+## TASK 2 RESULTS — TranscriptBand implementation
+
+**New file:** `WallPanel/WallPanel/Views/Voice/TranscriptBand.swift`
+
+### Typography
+- Font: `Caveat-Regular 48pt` — `HearthTypeSize.caveatLg` (the design system's designated voice transcript size, already defined)
+- Color: `Color.hearthCream` — single uniform color, no markup variation
+- Spec said "start at 36pt and adjust" — 48pt is what `caveatLg` is defined as in the design system. Applied directly rather than experimenting downward.
+- Max 2 lines, horizontal padding 48pt, centered
+
+### Paper background
+- `Color.hearthNight.opacity(0.82)` — warm almost-black base (hearthNight = 0x0E0A07, inherently amber-cast)
+- `Color.hearthAmberDim.opacity(0.07)` — strengthens amber warmth toward "paper in low light"
+- Canvas noise: 3000 white 2×2pt dots at `opacity(0.02)` — material variation without visible texture
+- Top border: `Color.hearthAmberDim.opacity(0.30).frame(height: 1)` — signals deliberate object, not transparency layer
+
+### Sizing
+- Width: full screen edge-to-edge (`maxWidth: .infinity`)
+- Height: `HearthStatusBar.height` — matches status bar real estate exactly
+
+### Rotation
+- `Double.random(in: -0.5...0.5)` degrees, set on each hidden→visible transition
+- Held for entire visibility duration; not re-rolled while band is visible
+- If band is already showing when state changes (e.g. ambient → modal), rotation preserved to avoid jarring mid-display shift
+
+### Animation
+- Appear: `easeOut(duration: 0.25)` fade-in
+- Disappear: `easeIn(duration: 0.40)` fade-out
+- Grace period: 1.5s after `.idle` fires before fade begins
+
+### Tap-to-dismiss
+- Cancels grace-period hide task immediately
+- `easeIn(duration: 0.25)` fade — faster than natural dismiss to feel responsive
+- Calls `onDismiss()` → `model.cancelVoiceModal()` → stops audio
+
+### Positioning fix (critical detail)
+Previous `AmbientTranscriptBand` used `VStack { Spacer(); content }` inside the root ZStack. With ZStack default `.center` alignment, `VStack` can be undersized and the band appears mid-screen. Fixed by:
+```swift
+ZStack(alignment: .bottom) {
+    Color.clear  // forces full-screen sizing
+    if visible && !currentPhrase.isEmpty {
+        bandContent
+    }
+}
+```
+`Color.clear` fills the full ZStack frame; `alignment: .bottom` anchors content to screen bottom regardless of parent layout.
+
+---
+
+## TASK 3 RESULTS — Wiring
+
+**VoiceModalOverlay** — transcript rendering removed:
+- Removed `phrase: String` parameter
+- Removed `TranscriptText(...)` and its fade-in `DispatchQueue` block
+- Now renders VoiceForm + surface dim only
+- Dim stops `HearthStatusBar.height` from bottom → transparent strip lets TranscriptBand show through
+
+**AmbientTranscriptBand** — fully deleted:
+- File removed from filesystem: `git rm`
+- All 4 pbxproj entries removed via Python in-place edit (PBXBuildFile, PBXFileReference, PBXGroup, PBXSourcesBuildPhase)
+
+**TranscriptBand** — added to project:
+- File added to pbxproj with new UUIDs: FileRef `B910D1C1AA6530EC7B7FE2BD`, BuildFile `3AF239299B83FDDF88CCDF42`
+
+**RootView** — rewired:
+- `AmbientTranscriptBand(...)` → `TranscriptBand(presentationState: model.voicePresentationState, onDismiss: { model.cancelVoiceModal() })`
+- VoiceModalOverlay condition: `if case .modalSpeaking = model.voicePresentationState` (no phrase extraction needed — band owns transcript)
+- VoiceModalOverlay call: `VoiceModalOverlay(onCancel: { model.cancelVoiceModal() })`
+- Z-order from bottom: AmbientView → MainPanelView → TranscriptBand → WriteToast → VoiceModalOverlay
+
+**VoicePresentationState:** unchanged — `.idle`, `.ambientSpeaking(phrase:source:)`, `.modalSpeaking(phrase:)` still the model.
+
+---
+
+## TASK 4 RESULTS — Formal verification
+
+**Status: NOT EXECUTED**
+
+Build 66 compiled clean but both iPads were unavailable for install at time of code completion (hotel WiFi insufficient; USB cable not available at that moment). All 11 cases remain pending.
+
+| Case | Description | Result |
+|------|-------------|--------|
+| 1 | Mic tap in ambient → overlay + band + audio | ⏳ pending |
+| 2 | Mic tap in full control → overlay + band + audio | ⏳ pending |
+| 3 | Walk up (ambient → quick) → band only, no overlay | ⏳ pending |
+| 4 | Tap into full → band covers action tiles | ⏳ pending |
+| 5 | Mic tap during ambient phrase → band transitions, overlay appears | ⏳ pending |
+| 6 | Tap overlay during playback → both fade, audio stops | ⏳ pending |
+| 7 | Status bar coverage: ambient=covered, engaged=visible at top | ⏳ pending |
+| 8 | Caveat 48pt legibility at panel viewing distance | ⏳ pending |
+| 9 | No layout shift on band appear/disappear | ⏳ pending |
+| 10 | Tap-to-dismiss from any state → audio stops, content reappears | ⏳ pending |
+| 11 | "Note feel" visual inspection | ⏳ pending |
+
+---
+
+## BUILD AND DEPLOY
+
+| Item | Detail |
+|------|--------|
+| Build number | 66 |
+| Build date | 2026-04-27 19:51 |
+| xcodebuild result | ✅ BUILD SUCCEEDED |
+| iPad Air install | ⏳ pending — device not connected |
+| iPad Pro install | ⏳ pending — device not connected |
+
+---
+
+## BRANCH AND TAG
+
+| Item | Detail |
+|------|--------|
+| Branch | `phase-0c-16-revise` |
+| Commit 1 | `ae3570b` — Phase 0c.16-revise: unified TranscriptBand — handwritten note redesign |
+| Commit 2 | `ae70f83` — fix(build66): correct Color(hex:) type in TranscriptBand preview |
+| Merge to main | ⏳ pending — awaiting device verification |
+| Tag v0.5.5-voice-revise | ⏳ pending |
+
+---
+
+## NOTES FOR NEXT SESSION
+
+- Both iPads need USB cable to receive build 66. Run `xcrun devicectl device install app --device <UDID> <app_path>` for each.
+  - iPad Air UDID: `25423385-294F-50EA-8498-5690FECE21BF`
+  - iPad Pro UDID: `8B58895C-4976-5DF7-AAA2-FD9EAEBB59F2`
+  - App path: `/Users/todd/Library/Developer/Xcode/DerivedData/Build/Products/Release-iphoneos/WallPanel.app`
+- After install, run all 11 verification cases and update this report.
+- After verification passes, merge `phase-0c-16-revise` → `main` (no-ff) and apply tag `v0.5.5-voice-revise`.
+- One design call to revisit on device: font size. Spec said "start at 36pt." We shipped 48pt (caveatLg). If DC wants 36pt trialed, change `HearthTypeSize.caveatLg` or add a new caveatMd constant and use that.
