@@ -1,8 +1,8 @@
 # Phase 0c.17 — Woadhouse conversational v1
 **Date:** 2026-04-27  
 **Tag:** v0.6.0-woadhouse-conversational (pending)  
-**Branch:** phase-0c-17-conversational (pending — pre-work gate not yet cleared)  
-**Status:** 🔴 BLOCKED — 0c.16-revise not merged to main
+**Branch:** phase-0c-17-conversational → code complete, build 67, device verification pending  
+**Status:** ⏸ Code complete — awaiting device install for Task 12 verification
 
 ---
 
@@ -728,13 +728,218 @@ the normal pattern.
 
 ---
 
-## PRE-WORK STATUS — BLOCKED
+## PRE-WORK STATUS — CLEARED
 
-**main is at:** `56bcfed` — `Merge phase-0c-17ab-cleanup-and-audit → main` (v0.5.4)  
-**Required:** v0.5.5-voice-revise (0c.16-revise merged)  
-**0c.16-revise branch:** `phase-0c-16-revise` — code complete, build 66 compiled clean, **not yet merged**
+**main at start:** `56bcfed` — v0.5.4  
+**0c.16-revise:** merged to main `3d59456`, tagged `v0.5.5-voice-revise`  
+Todd authorized merging without formal device verification. Pre-work gate cleared. 0c.17 branch created off v0.5.5.
 
-The 0c.16-revise branch is blocked on USB-cable device verification (11 cases). No iPads were physically available for install at the time code was completed. Per spec: STOP and report.
+---
 
-**Decision needed from Todd / DC:**  
-Either (a) plug in an iPad to install build 66 and run the 11 verification cases, then merge and clear the gate, or (b) authorize merging 0c.16-revise to main without formal device verification (accepting that risk) so 0c.17 can proceed. 0c.17 work will not begin until the gate clears.
+## TASKS 1-11 RESULTS — Code complete, build 67
+
+### Task 1 — VoiceAssistant protocol
+
+**File:** `WallPanel/Services/Voice/VoiceAssistant.swift`
+
+Protocol + supporting types as specified:
+- `protocol VoiceAssistant` with `respond(to:context:) async throws -> VoiceAssistantResponse`
+- `VoiceContext`, `VoiceTurn`, `VoiceRole`, `VoiceAssistantResponse`, `ResponseMetadata`
+- No changes from spec — types match exactly.
+
+### Task 2 — ClaudeVoiceAssistant + AnthropicAPIClient
+
+**Files:** `Services/Voice/ClaudeVoiceAssistant.swift`, `Services/Voice/AnthropicAPIClient.swift`
+
+- Non-streaming, full-response-then-TTS (streaming is 0c.18)
+- Model: `claude-haiku-4-5` — **verify current model ID at https://docs.anthropic.com before shipping**
+- `max_tokens: 200` ceiling
+- Conversation history: last 6 turns, in-memory, resets on app launch
+- System prompt loaded from `woadhouse-system-prompt-v1.md` bundle resource; graceful fallback if missing
+- API key from `VoiceAPIConfig.anthropicAPIKey` (Keychain-backed)
+- Error handling: throw, caller handles silently per spec
+
+**API key setup required before first use:**
+```swift
+// Run once in WallPanelApp.init(), then remove:
+KeychainHelper.save(key: "VoiceAPI.anthropicKey", value: "sk-ant-YOUR-KEY")
+KeychainHelper.save(key: "VoiceAPI.cartesiaKey",  value: "sk_car_YOUR-KEY")
+```
+
+### Task 3 — AppleSpeechCoordinator
+
+**File:** `Services/Voice/AppleSpeechCoordinator.swift`
+
+- `requiresOnDeviceRecognition = true` for privacy
+- `startListening()` / `stopListening() async -> String` / `cancelListening()`
+- Audio session: `.record` during capture, restored to `.playback` after stop
+- 10-second auto-stop guard
+- Permission requested on first use via `requestPermissions()`
+- Empty transcript returns `""` — VoiceCoordinator handles silently
+
+### Task 4 — System prompt
+
+**File:** `WallPanel/woadhouse-system-prompt-v1.md` (bundled as app resource)
+
+Exact content from DC spec, verbatim. Not modified during implementation. Loaded by `ClaudeVoiceAssistant.init()`.
+
+### Task 5 — Press-and-hold gesture
+
+**Modified:** `Views/StatusBarView.swift`
+
+Mic Button implementation via `onLongPressGesture`:
+- `minimumDuration: 0.4` (400ms threshold)
+- `perform:` fires at threshold → `UIImpactFeedbackGenerator.medium` haptic + `model.startVoiceListening()`
+- `onPressingChanged:` fires on release:
+  - If threshold crossed (`holdActive == true`): `model.stopAndSendVoice()`
+  - If released before threshold: `model.speakRandomPhrase()` (existing tap behavior unchanged)
+- Mic icon brightens from `hearthAmberDim` → `hearthAmber` when hold is active
+
+### Task 6 — VoiceForm .listening state
+
+**Modified:** `Views/Voice/VoiceForm.swift`
+
+- `.listening` case added to `VoiceFormState`
+- Rings emanate **outward** (scale 0.6→1.2, vs inward 1.0→0.6 for speaking)
+- Slightly faster cycle: 0.80s/ring (vs 0.90s for speaking)
+- Ring stagger: +0ms, +270ms, +540ms
+- Core: `hearthAmber` (full brightness, no dim), no breathing pulse
+- Transitions between states smooth via existing `onChange(of:)` mechanism
+
+### Task 7 — TranscriptBand dual-utterance
+
+**Modified:** `Views/Voice/TranscriptBand.swift`
+
+New state handled: `.processingUserUtterance(text: String)` added to `VoicePresentationState`
+- Shows user text in `hearthCreamDim` (dimmer — "your words, held briefly")
+- No grace-period hide task — state transitions to `.modalSpeaking` (response) or `.idle` (error) from VoiceCoordinator
+- Existing `.modalSpeaking` / `.ambientSpeaking` continue to show `hearthCream` (unchanged)
+
+### Task 8 — VoiceCoordinator
+
+**File:** `Services/Voice/VoiceCoordinator.swift`
+
+`@Observable @MainActor` class owned by AppModel. Orchestrates:
+1. `startListening()` → `AppleSpeechCoordinator.startListening()`
+2. `stopAndSend()` → STT → `.processingUserUtterance` → LLM → TTS → `.modalSpeaking` + audio
+3. `cancel()` → abort all, return to `.idle`
+
+Failure flows per spec:
+- Empty transcript: `.idle` immediately, no band, no audio
+- LLM error: user text lingers 2s, then `.idle` — no Woadhouse response
+- TTS error: response text shown in band for 3s without audio, then `.idle`
+- Network unavailable: same as LLM error
+
+### Task 9 — Telemetry framework
+
+**File:** `Services/Voice/VoiceInteractionTelemetry.swift`
+
+`VoiceInteractionTelemetry` struct with T1-T10 timestamps and derived metrics. Compiled to `#if DEBUG`. Console log format:
+```
+[VoiceTelemetry] interaction abc-123:
+  perceived: 1124ms (T9-T1)
+  stt: 287ms
+  llm ttft: n/a  (non-streaming in 0c.17)
+  llm full: 892ms
+  tts ttfa: 94ms
+  total: 1219ms (T10-T1)
+```
+
+Note: `llmTtft` is always `n/a` in this phase — TTFT separation requires streaming (0c.18).
+
+### Task 10 — Cost monitoring
+
+**File:** `Services/Voice/VoiceInteractionTelemetry.swift` (same file, `VoiceCostLog`)
+
+`#if DEBUG` only. Logs after each interaction:
+```
+[VoiceCost] interaction abc-123:
+  cartesia chars: 87 (~$0.0044)
+  anthropic tokens: 312 in, 47 out (~$0.0006)
+```
+Rates: Cartesia $0.05/1000 chars, Anthropic Haiku $1/M input + $5/M output.
+
+### Task 11 — VoiceService integration
+
+**Modified:** `Services/VoiceService.swift`
+
+Added:
+```swift
+func playRawAudio(_ data: Data, phrase: String)
+```
+Creates `AVAudioPlayer(data:)` from Cartesia mp3 bytes, stops any existing audio, sets `presentationState = .modalSpeaking(phrase:)`, plays. Delegate `audioPlayerDidFinishPlaying` fires → `.idle` (existing infrastructure, unchanged).
+
+Also added: `VoicePresentationState.processingUserUtterance(text: String)` case + `Equatable` conformance.
+
+---
+
+## BUILD AND DEPLOY
+
+| Item | Detail |
+|------|--------|
+| Build number | 67 |
+| Build date | 2026-04-27 20:30 |
+| xcodebuild result | ✅ BUILD SUCCEEDED |
+| iPad Air install | ⏳ pending — device not connected |
+| iPad Pro install | ⏳ pending — device not connected |
+
+---
+
+## TASK 12 — Formal verification
+
+**Status: NOT EXECUTED** — iPads not physically available.
+
+| Case | Description | Result |
+|------|-------------|--------|
+| 1 | Tap/hold threshold disambiguation | ⏳ pending |
+| 2 | Happy path: "What's your name?" | ⏳ pending |
+| 3 | Backronym response | ⏳ pending |
+| 4 | Capability deflection: "Turn off the lights" | ⏳ pending |
+| 5 | Empty utterance — silent grace | ⏳ pending |
+| 6 | Release before threshold → tap behavior | ⏳ pending |
+| 7 | Conversation continuity (2-turn) | ⏳ pending |
+| 8 | Listening state rings: outward, amber, no pulse | ⏳ pending |
+| 9 | Dual-utterance color distinction | ⏳ pending |
+| 10 | Tap-to-dismiss during conversational audio | ⏳ pending |
+| 11 | Telemetry in console | ⏳ pending |
+| 12 | Cost telemetry in console | ⏳ pending |
+| 13 | Network failure — silent grace | ⏳ pending |
+| 14 | Existing tap behavior unchanged | ⏳ pending |
+
+---
+
+## BRANCH AND TAG
+
+| Item | Detail |
+|------|--------|
+| Branch | `phase-0c-17-conversational` |
+| Commit | `89fa25a` — Phase 0c.17: Woadhouse conversational v1 (full pipeline, build 67) |
+| Merge to main | ⏳ pending — awaiting device verification |
+| Tag v0.6.0-woadhouse-conversational | ⏳ pending |
+
+---
+
+## NOTES FOR NEXT SESSION
+
+**Before first conversational use — seed API keys into device Keychain:**
+
+```swift
+// Add temporarily to WallPanelApp.init(), run once, then remove:
+KeychainHelper.save(key: "VoiceAPI.anthropicKey", value: "sk-ant-YOUR-KEY-HERE")
+KeychainHelper.save(key: "VoiceAPI.cartesiaKey",  value: "sk_car_YOUR-KEY-HERE")
+```
+Keys persist in Keychain through reinstalls. Remove the seed code after first run.
+
+**Model ID note:** `VoiceAPIConfig.anthropicModel = "claude-haiku-4-5"` — verify against https://docs.anthropic.com before shipping. If wrong, API returns a clear error and the coordinator fails silently.
+
+**Install commands when device is available:**
+```bash
+APP=/Users/todd/Library/Developer/Xcode/DerivedData/Build/Products/Release-iphoneos/WallPanel.app
+xcrun devicectl device install app --device 25423385-294F-50EA-8498-5690FECE21BF "$APP"  # iPad Air
+xcrun devicectl device install app --device 8B58895C-4976-5DF7-AAA2-FD9EAEBB59F2 "$APP"  # iPad Pro
+```
+
+**After verification passes:**
+1. Merge `phase-0c-17-conversational` → `main` (no-ff)
+2. Apply tag `v0.6.0-woadhouse-conversational`
+3. Update this report with Task 12 results
