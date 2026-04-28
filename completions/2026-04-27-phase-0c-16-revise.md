@@ -1,8 +1,8 @@
 # Phase 0c.16-revise — Voice transcription redesign
 **Date:** 2026-04-27  
-**Tag:** v0.5.5-voice-revise (pending — awaiting device verification)  
-**Branch:** phase-0c-16-revise  
-**Status:** ⏸ Code complete — awaiting device install for Task 4 verification
+**Tag:** v0.5.5-voice-revise ✅  
+**Branch:** phase-0c-16-revise → merged to main `3d59456`  
+**Status:** ✅ Merged — Task 4 device verification deferred to 0c.17 session
 
 ---
 
@@ -488,8 +488,8 @@ Build 66 compiled clean but both iPads were unavailable for install at time of c
 | Branch | `phase-0c-16-revise` |
 | Commit 1 | `ae3570b` — Phase 0c.16-revise: unified TranscriptBand — handwritten note redesign |
 | Commit 2 | `ae70f83` — fix(build66): correct Color(hex:) type in TranscriptBand preview |
-| Merge to main | ⏳ pending — awaiting device verification |
-| Tag v0.5.5-voice-revise | ⏳ pending |
+| Merge to main | ✅ `3d59456` — 2026-04-27 |
+| Tag v0.5.5-voice-revise | ✅ applied to `3d59456` |
 
 ---
 
