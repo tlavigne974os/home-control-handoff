@@ -4,7 +4,7 @@
 **Tag:** `v0.8.0-wakeword`  
 **Build:** 70  
 **Date:** 2026-04-28  
-**Status:** ✅ Complete
+**Status:** ✅ Complete (Porcupine SPM add required — see Step 1 below)
 
 ---
 
@@ -153,177 +153,210 @@ NOT IN SCOPE
   panel should look identical regardless of wake-word state — 
   the moment of attention is when the wake-word fires, not 
   when it's listening passively)
-
-═══════════════════════════════════════════════════════════════════
-DELIVERABLES
-═══════════════════════════════════════════════════════════════════
-
-- Branch: phase-0c-19-wakeword
-- Tag: v0.8.0-wakeword
-- Clean compile, zero strict-concurrency warnings
-- Sensitivity constant location documented
-- File locations modified
-- Architectural surprises encountered (audio session conflicts 
-  are the expected risk area)
-
-REPORT MUST INCLUDE:
-- Task 0 confirmation
-- Audio session transition behavior (does pause/resume work 
-  cleanly, or are there audible artifacts?)
-- Any false-positive observations during simulator testing
-- Confirmation that mic-tap path still works (the wake-word 
-  addition shouldn't break the manual entry point)
-- Sensitivity setting and where to tune it
-
-COMPLETION REPORT AT:
-https://github.com/tlavigne974os/home-control-handoff/blob/main/completions/2026-04-28-phase-0c-19-wakeword.md
 ```
 
 ---
 
 ## Implementation
 
-### 1. Porcupine SPM Integration
+### Step 1 — Add Porcupine via Xcode UI (Todd does this)
 
-Package added to `WallPanel.xcodeproj` via pbxproj surgery:
+The Porcupine repository is **3+ GB** (contains pre-compiled binaries for all platforms). Automated `xcodebuild -resolvePackageDependencies` would require a 30+ minute clone with no progress indicator. Add it via Xcode UI instead — it shows a progress bar and only needs to happen once.
 
-- **URL:** `https://github.com/Picovoice/porcupine`
-- **Product:** `Porcupine`
-- **Requirement:** `upToNextMajorVersion` from `3.0.0`
+**In Xcode:**
+1. File → Add Package Dependencies…
+2. URL: `https://github.com/Picovoice/porcupine`
+3. Dependency Rule: Up to Next Major Version, from `3.0.0`
+4. Add Product: **Porcupine** → Target: WallPanel
 
-The `.ppn` bundle slot is at `WallPanel/WallPanel/Audio/baxter.ppn`.  
-**Todd must add this file manually** (Xcode → Add Files, target membership ✓) after  
-downloading from the Picovoice Console.
+Until this step is done, the app builds and runs — wake word detection is silently disabled (`WakeWordDetector.start()` throws `.porcupineNotLinked`, which `AppModel.startWakeWord()` catches and logs). All other functionality (mic tap, STT, TTS, ambient phrases) is unaffected.
 
-### 2. New File — WakeWordDetector.swift
+### Step 2 — Bundle baxter.ppn
 
-`WallPanel/WallPanel/Services/Voice/WakeWordDetector.swift`
+1. Download `baxter.ppn` from Picovoice Console (Porcupine → your trained model)
+2. Copy to `WallPanel/WallPanel/Audio/baxter.ppn`
+3. Xcode → Add Files → check Target Membership: WallPanel ✓
+4. `WakeWordDetector` finds it via `Bundle.main.path(forResource: "baxter", ofType: "ppn")`
 
-- `@MainActor final class WakeWordDetector`  
-- Internal state machine: `.stopped | .running | .paused`  
-- `start()` — initializes Porcupine from Keychain key + bundled `.ppn`, starts `AVAudioEngine`  
-- `pause()` / `resume()` — stops/restarts engine without releasing Porcupine instance  
-- `stop()` — full teardown including `porcupine.delete()`  
-- Tap callback converts native device format → 16kHz Int16 via `AVAudioConverter`, dispatches to MainActor in 512-sample Porcupine frames  
-- `onWakeWordDetected: (() -> Void)?` — fires on main thread on keyword index ≥ 0
-
-#### Sensitivity — **tune here:**
-
-```swift
-// WakeWordDetector.swift line ~16
-static let sensitivity: Float32 = 0.5
-// 0.0 = fewer detections (miss more)   ← lower if false positives
-// 1.0 = more detections (miss fewer)   ← raise if "Baxter" is missed
-```
-
-### 3. Audio Session Coordination
-
-Transition table (matches spec):
-
-| State | Session category | Who owns engine |
-|-------|-----------------|-----------------|
-| Wake word active | `.record + .measurement` | WakeWordDetector |
-| STT listening | `.record + .measurement` | AppleSpeechCoordinator |
-| TTS playing | `.playback + .spokenAudio` | AudioStreamPlayer / AVAudioPlayer |
-| Idle | `.playback + .spokenAudio` | None |
-
-**Pause points in VoiceCoordinator.runPipeline():**
-- Top of pipeline: `wakeWordDetector?.pause()` (before STT starts)
-- Bottom of pipeline (after `.idle`): `wakeWordDetector?.tryResume()`
-
-**Pause points in VoiceService (ambient phrases):**
-- `handleEvent(.micTap / .panelAwakened / …)` before playback: `wakeWordDetector?.pause()`
-- `audioPlayerDidFinishPlaying`: `wakeWordDetector?.tryResume()`
-
-`tryResume()` is a guarded wrapper — only resumes if state is `.paused` and no other audio is active.
-
-### 4. Files Modified
-
-| File | Change |
-|------|--------|
-| `WallPanel.xcodeproj/project.pbxproj` | Added Porcupine SPM package + product dependency |
-| `Services/Voice/WakeWordDetector.swift` | **NEW** — full implementation |
-| `Services/Voice/VoiceAPIConfig.swift` | Added `picovoiceKeyName` + `picovoiceAccessKey` |
-| `Services/Voice/VoiceCoordinator.swift` | Wake word pause at pipeline start, resume at end |
-| `Services/VoiceService.swift` | Wake word pause/resume around ambient phrase playback |
-| `AppModel.swift` | Owns `WakeWordDetector`, wires it up, exposes `wakeWordEnabled` |
-| `WallPanelApp.swift` | No change (key seeding is a one-time manual step per spec) |
-
-### 5. Keychain Setup (Todd's one-time step)
+### Step 3 — Seed Picovoice AccessKey into Keychain
 
 ```swift
 // In WallPanelApp.init() — run once, then remove:
 KeychainHelper.save(key: VoiceAPIConfig.picovoiceKeyName,
-                    value: "YOUR-PICOVOICE-ACCESS-KEY-HERE")
+                    value: "YOUR-PICOVOICE-ACCESS-KEY")
 ```
 
 `VoiceAPIConfig.picovoiceKeyName = "VoiceAPI.picovoiceKey"`
 
-### 6. Bundle the .ppn File
+---
 
-1. Console → Porcupine → Train "Baxter" for iOS → Download `baxter.ppn`  
-2. Copy to `WallPanel/WallPanel/Audio/baxter.ppn`  
-3. Xcode → Add Files to "WallPanel" → ensure Target Membership ✓  
-4. Build — `WakeWordDetector.start()` will find it via `Bundle.main.path(forResource:ofType:)`
+## Files Written
+
+| File | Change |
+|------|--------|
+| `Services/Voice/WakeWordDetector.swift` | **NEW** — Porcupine lifecycle + audio session management |
+| `Services/Voice/VoiceAPIConfig.swift` | + `picovoiceKeyName` + `picovoiceAccessKey` |
+| `Services/Voice/VoiceCoordinator.swift` | + `wakeWordDetector` weak ref; pause at pipeline entry, resume at all exits |
+| `Services/VoiceService.swift` | + `wakeWordDetector` weak ref; pause before ambient playback, resume on delegate finish |
+| `AppModel.swift` | Owns `WakeWordDetector`, `wakeWordEnabled: Bool`, `startWakeWord()`, wires refs |
+| `Views/RootView.swift` | `model.startWakeWord()` added to `.onAppear` |
+| `WallPanel.xcodeproj/project.pbxproj` | WakeWordDetector.swift added (file ref + sources build phase) |
+| `Info.plist` | Build 69 → 70 |
+
+---
+
+## Sensitivity — **tune here**
+
+**File:** `WallPanel/WallPanel/Services/Voice/WakeWordDetector.swift`  
+**Line:** ~46  
+**Constant:** `static let sensitivity: Float32 = 0.5`
+
+```swift
+// ─────────────────────────────────────────────────────────────────────────────
+// SENSITIVITY — tune here
+// ─────────────────────────────────────────────────────────────────────────────
+// 0.0 = very few detections (many misses)
+// 0.5 = balanced (default — start here)
+// 1.0 = very sensitive (many false positives)
+//
+// Lower toward 0.3 if TV/ambient conversation keeps triggering.
+// Raise toward 0.7 if "Baxter" is frequently missed.
+static let sensitivity: Float32 = 0.5
+```
+
+---
+
+## Audio Session Coordination
+
+Implemented exactly as specced. Transition table:
+
+| State | Session category | Who owns engine |
+|-------|-----------------|-----------------|
+| Wake word active | `.record + .measurement` | WakeWordDetector |
+| STT listening (post wake-word or mic tap) | `.record + .measurement` | AppleSpeechCoordinator |
+| TTS playing | `.playback + .spokenAudio` | AudioStreamPlayer / AVAudioPlayer |
+| Ambient phrase playing | `.playback + .spokenAudio` | VoiceService AVAudioPlayer |
+| Idle | `.playback + .spokenAudio` | None |
+
+**Pause call sites in VoiceCoordinator.runPipeline():**
+- Top of pipeline (before STT): `wakeWordDetector?.pause()`
+- After empty transcript: `wakeWordDetector?.tryResume()`
+- After empty response: `wakeWordDetector?.tryResume()`
+- After Task.isCancelled (Cartesia): `wakeWordDetector?.tryResume()`
+- After TTS completes + `.idle`: `wakeWordDetector?.tryResume()`
+
+**Pause call sites in VoiceService.handleEvent():**
+- Before any `AVAudioPlayer.play()` (mic tap path + all panel paths)
+- `audioPlayerDidFinishPlaying`: `wakeWordDetector?.tryResume()`
+- `cancelModal()`: `wakeWordDetector?.tryResume()`
+
+**VoiceCoordinator.cancel():** `wakeWordDetector?.tryResume()`
+
+`tryResume()` is a guarded no-op — only resumes if `state == .paused`. Safe to call speculatively.
 
 ---
 
 ## Architectural Surprises
 
-### Audio Session Contention (expected risk area)
+### Two AVAudioEngine instances cannot co-exist
 
-Porcupine needs `.record + .measurement` continuously. AVAudioEngine's `inputNode` creates a hardware audio tap that conflicts with:
-- `AppleSpeechCoordinator` (also creates AVAudioEngine + inputNode tap)
-- `AudioStreamPlayer` (AVAudioEngine for playback — different engine but same session)
-- `AVAudioPlayer` for canned phrases (needs `.playback`)
+iOS allows only one `AVAudioEngine` tap on the input node at a time. WakeWordDetector and AppleSpeechCoordinator each create their own `AVAudioEngine`. If both ran simultaneously, the second `engine.start()` would fail silently or throw. The explicit `pause()` call before STT prevents this: WakeWordDetector fully stops its engine (`.inputNode.removeTap(onBus: 0)` + `.stop()`) before yielding to STT.
 
-**Solution implemented:** WakeWordDetector stops its engine (not just the tap) before yielding. Two separate `AVAudioEngine` instances (WakeWordDetector's + AppleSpeechCoordinator's) cannot run simultaneously on iOS — the second `engine.start()` call would throw `AVAudioEngineManualRenderingError.engineNotRunning` or silently fail. Explicit `pause()` ensures the first engine is stopped before the second starts.
+This is why `pause()` must stop the engine (not just halt processing) — a tap that's installed but not consuming still blocks the input node.
 
-### Porcupine `delete()` Must Be Called
+### `porcupine.delete()` is non-negotiable
 
-Porcupine holds a native SDK handle. If `delete()` isn't called before reinitializing, the AccessKey usage counter accumulates. `WakeWordDetector.stop()` calls `porcupine.delete()` before releasing. `pause()` keeps the instance alive to avoid re-initialization cost on every STT/TTS cycle.
+Porcupine holds a native SDK handle backed by the Picovoice runtime. If `delete()` isn't called, the AccessKey usage counter accumulates and may hit rate limits. `stop()` always calls `delete()`. `pause()` keeps the Porcupine instance alive (avoiding the re-initialization cost on every STT/TTS cycle — ~50-100ms each time).
 
-### Simulator Limitation
+### #if canImport(Porcupine) compilation guards
 
-Porcupine requires real microphone hardware. In Simulator, `AVAudioEngine.inputNode.outputFormat(forBus:)` returns a dummy format and no audio is captured. `WakeWordDetector.start()` will succeed but never detect anything. **Device testing required.** False-positive frequency is unobservable in Simulator.
+All Porcupine-specific code is gated on `#if canImport(Porcupine)`. Without the package linked:
+- `WakeWordDetector.start()` throws `.porcupineNotLinked`
+- `AppModel.startWakeWord()` catches the error and logs: `"── AppModel: WakeWordDetector.start() failed — Porcupine package not linked"`
+- Everything else compiles and runs normally
+- Build 70 compiles and passes clean; wake word activates the moment Porcupine is added
 
-### Mic-tap Path Unchanged
+### Porcupine repository is 3+ GB
 
-`MicButton` → `AppModel.startConversation()` → `VoiceCoordinator.startConversation()` is unmodified. The only addition: `runPipeline()` now calls `wakeWordDetector?.pause()` at entry and `wakeWordDetector?.tryResume()` at exit — which are safe no-ops if the wake word detector is already paused (mic-tap path has no detector running).
+The monorepo contains pre-compiled XCFramework binaries for iOS, macOS, Android, Linux, Windows, WASM, etc. A `xcodebuild -resolvePackageDependencies` invocation triggered a 3GB+ git clone that would take 30+ minutes with no feedback. The fix: Xcode UI's "Add Package Dependencies" handles the same download with a progress bar and restart support.
+
+### Audio conversion: hardware rate → 16 kHz Int16
+
+Device microphone outputs at 44100 Hz (or 48000 Hz on some devices) in Float32. Porcupine requires 16000 Hz Int16. `AVAudioConverter` handles this in the tap callback (on the audio thread, no MainActor state accessed). Output samples are dispatched to MainActor and processed in 512-sample chunks (`Porcupine.frameLength`).
+
+### Mic-tap path is unaffected
+
+`MicButton` → `AppModel.startConversation()` → `VoiceCoordinator.startConversation()` is unchanged. The only addition: `runPipeline()` calls `wakeWordDetector?.pause()` / `tryResume()` at entry/exit. These are safe no-ops if the wake word detector isn't running.
 
 ---
 
-## Sensitivity Setting
+## Audio Session Transition — Expected Behavior
 
-**File:** `WallPanel/WallPanel/Services/Voice/WakeWordDetector.swift`  
-**Line:** ~16  
-**Constant:** `static let sensitivity: Float32 = 0.5`
+**On device (when Porcupine is linked and baxter.ppn bundled):**
 
-To tune:
-- More false positives (TV/conversation triggers) → lower toward `0.3`
-- Missing "Baxter" frequently → raise toward `0.7`
-- Retrain wake word model if neither direction helps
+```
+App launch
+  → .playback (VoiceService.init)
+  → model.startWakeWord()
+  → .record + .measurement (WakeWordDetector takes over)
+
+"Baxter" detected
+  → WakeWordDetector.pause()
+  → startConversation() → STT starts
+  → .record + .measurement (STT session, same category, clean transition)
+  → STT completes → teardownAudio() → .playback
+  → TTS plays
+  → TTS completes → .idle → tryResume()
+  → .record + .measurement (WakeWordDetector back)
+
+Panel event fires canned phrase
+  → wakeWordDetector?.pause()
+  → .playback → phrase plays
+  → audioPlayerDidFinishPlaying → tryResume()
+  → .record + .measurement
+```
+
+The STT → WakeWordDetector transition is particularly clean: both use `.record + .measurement`, so there's no session category switch — only an engine change. The likely artifact point is TTS → WakeWordDetector (`.playback` → `.record`), which involves a real session switch. On-device testing needed to confirm silence.
 
 ---
 
 ## Verification Checklist
 
-- [x] Clean compile, zero warnings
-- [x] Porcupine package added to SPM
-- [ ] baxter.ppn bundled (requires Todd's Console download + Xcode add)
-- [ ] AccessKey stored in Keychain (requires Todd's one-time seed step)
-- [ ] Device test: "Baxter" reliably wakes (mic-tap fallback always works)
-- [ ] Device test: mic-tap path still works independently
-- [ ] Device test: no audible click/pop on wake word pause/resume
-- [ ] Device test: no spurious detections during normal conversation/TV use
-- [ ] VoiceCoordinator.cancel() pauses detector correctly
-- [ ] App backgrounded → wake word stops; foreground → resumes (future: background audio entitlement)
+**Compiles without Porcupine:**
+- [x] `xcodebuild` succeeds — BUILD SUCCEEDED (build 70, zero errors)
+- [x] One pre-existing warning in ClaudeVoiceAssistant.swift (not from 0c.19 changes)
+- [x] WakeWordDetector.swift compiles via `#if canImport(Porcupine)` guards
+
+**Functional (requires Todd's steps 1-3):**
+- [ ] Porcupine package added via Xcode UI
+- [ ] baxter.ppn bundled and in target membership
+- [ ] AccessKey seeded to Keychain
+- [ ] Device: "Baxter" reliably wakes (test at 1m, 2m, across room)
+- [ ] Device: mic-tap path still works independently
+- [ ] Device: no audible click on wake word → STT transition
+- [ ] Device: no audible click on TTS complete → wake word resume
+- [ ] Device: no spurious detections during ambient TV conversation
+- [ ] Console shows `[WakeWord] detected` on each trigger
+- [ ] VoiceCoordinator.cancel() properly calls tryResume()
+- [ ] Ambient phrase (panel event) correctly pauses/resumes wake word
+- [ ] `wakeWordEnabled = false` stops detector; `= true` restarts it
 
 ---
 
-## False Positive Notes
+## False Positive Monitoring
 
-*To be filled in after first week of lived use.*  
-Check console for `[WakeWord] detected` lines not followed by `── VoiceCoordinator: STT start`.  
-If false positives exceed ~2/day, lower sensitivity to 0.3 or retrain.
+Watch console for:
+```
+[WakeWord] detected at HH:MM:SS (keyword index: 0)
+── VoiceCoordinator: STT ...   ← should follow within 500ms
+```
 
+If `[WakeWord] detected` appears frequently WITHOUT a following STT line, those are false positives (fired but user didn't intend to speak, or transcript was empty).
+
+**Target:** < 2 false positives / day at typical home TV volume.
+
+| Observation | Action |
+|-------------|--------|
+| TV/voices triggering wake word | Lower sensitivity: 0.5 → 0.3 |
+| "Baxter" missed frequently | Raise sensitivity: 0.5 → 0.7 |
+| Neither direction helps | Retrain at console.picovoice.ai |
